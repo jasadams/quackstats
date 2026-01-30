@@ -1,0 +1,12 @@
+# name: test/sql/quackstats.test
+# group: quackstats
+
+require quackstats
+
+# Basic forecast call returns 3 rows with hardcoded data
+query IRRI
+SELECT * FROM forecast('test_ts', timestamp := 'ds', value := 'revenue', horizon := 3);
+----
+2026-02-01	100.0	90.0	110.0
+2026-02-02	102.0	91.0	113.0
+2026-02-03	104.0	92.0	116.0

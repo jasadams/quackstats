@@ -1,0 +1,22 @@
+[package]
+name = "quackstats"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Time series forecasting and statistics for DuckDB"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+
+[[example]]
+name = "quackstats"
+path = "src/wasm_lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+duckdb = { version = "=1.4.4", features = ["loadable-extension"] }
+libduckdb-sys = "=1.4.4"
