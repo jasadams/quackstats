@@ -1,3 +1,6 @@
+/// Minimum number of data points required for ETS forecasting.
+pub const MIN_DATA_POINTS: usize = 4;
+
 /// A single time series of (timestamp, value) pairs.
 /// Timestamps are DuckDB DATE values: days since 1970-01-01 (Unix epoch).
 pub struct TimeSeries {

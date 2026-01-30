@@ -2,17 +2,16 @@ pub mod models;
 pub mod params;
 
 use duckdb::{
-    core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId},
+    core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Result,
 };
-use std::{
-    error::Error,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::cell::UnsafeCell;
+use std::error::Error;
 
+use crate::common::grouping::GroupForecastRow;
 use crate::common::table_reader;
-use crate::common::types::ForecastResult;
+use crate::common::types::{ForecastResult, MIN_DATA_POINTS};
 use crate::ConnHandle;
 use params::ForecastParams;
 
@@ -27,12 +26,32 @@ pub struct ForecastBindData {
 unsafe impl Send for ForecastBindData {}
 unsafe impl Sync for ForecastBindData {}
 
+/// Mutable state for the forecast init data.
+/// Wrapped in UnsafeCell because the VTab trait provides &self in func()
+/// but we need to mutate position across calls.
+struct ForecastState {
+    /// Pre-computed rows for output.
+    rows: Vec<GroupForecastRow>,
+    /// Current position into `rows` for chunked emission.
+    position: usize,
+    /// Whether the computation has been performed.
+    computed: bool,
+}
+
 /// Init data for the forecast table function.
-/// Tracks whether we have already emitted our result rows.
+///
+/// Uses UnsafeCell for interior mutability because the VTab func() receives
+/// &self but we need to track position across multiple calls. The DuckDB VTab
+/// contract guarantees single-threaded access per query execution.
 #[repr(C)]
 pub struct ForecastInitData {
-    done: AtomicBool,
+    state: UnsafeCell<ForecastState>,
 }
+
+// Safety: DuckDB guarantees single-threaded access per query. The UnsafeCell
+// is only mutated within func() which is called sequentially by one thread.
+unsafe impl Send for ForecastInitData {}
+unsafe impl Sync for ForecastInitData {}
 
 pub struct ForecastVTab;
 
@@ -41,20 +60,29 @@ impl VTab for ForecastVTab {
     type BindData = ForecastBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        // Define output columns
+        let params = ForecastParams::from_bind_info(bind)?;
+
+        // Add group columns first (all as VARCHAR)
+        for col_name in &params.group_by {
+            bind.add_result_column(col_name, LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        }
+
+        // Add the standard forecast output columns
         bind.add_result_column("forecast_timestamp", LogicalTypeHandle::from(LogicalTypeId::Date));
         bind.add_result_column("forecast", LogicalTypeHandle::from(LogicalTypeId::Double));
         bind.add_result_column("lower_bound", LogicalTypeHandle::from(LogicalTypeId::Double));
         bind.add_result_column("upper_bound", LogicalTypeHandle::from(LogicalTypeId::Double));
-
-        let params = ForecastParams::from_bind_info(bind)?;
 
         Ok(ForecastBindData { params })
     }
 
     fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
         Ok(ForecastInitData {
-            done: AtomicBool::new(false),
+            state: UnsafeCell::new(ForecastState {
+                rows: Vec::new(),
+                position: 0,
+                computed: false,
+            }),
         })
     }
 
@@ -63,14 +91,13 @@ impl VTab for ForecastVTab {
         output: &mut DataChunkHandle,
     ) -> Result<(), Box<dyn Error>> {
         let init_data = func.get_init_data();
-
-        if init_data.done.swap(true, Ordering::Relaxed) {
-            output.set_len(0);
-            return Ok(());
-        }
-
         let bind_data = func.get_bind_data();
         let params = &bind_data.params;
+
+        // Safety: DuckDB VTab contract guarantees single-threaded func() calls
+        // per query execution. UnsafeCell provides the interior mutability we
+        // need to track state across calls.
+        let state = unsafe { &mut *init_data.state.get() };
 
         // Get the connection handle from extra info (stored during extension init)
         let conn_handle_ptr = func.get_extra_info::<ConnHandle>();
@@ -79,52 +106,85 @@ impl VTab for ForecastVTab {
         }
         let con = unsafe { (*conn_handle_ptr).0 };
 
-        // Read the source table data
-        let series = unsafe {
-            table_reader::read_time_series(
-                con,
-                &params.table_name,
-                &params.timestamp_col,
-                &params.value_col,
-            )
+        // Compute results on first call
+        if !state.computed {
+            state.computed = true;
+
+            if params.group_by.is_empty() {
+                state.rows = compute_single_forecast(con, params)?;
+            } else {
+                state.rows = compute_grouped_forecast(con, params)?;
+            }
         }
-        .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
-        // Run ETS forecasting
-        let result: ForecastResult = models::forecast_ets(
-            &series,
-            params.horizon as usize,
-            params.confidence_level,
-        )
-        .map_err(|e| -> Box<dyn Error> { e.into() })?;
-
-        let num_rows = result.timestamps.len();
-        if num_rows == 0 {
+        // Emit rows from the pre-computed results
+        let remaining = state.rows.len() - state.position;
+        if remaining == 0 {
             output.set_len(0);
             return Ok(());
         }
 
-        // Write forecast_timestamp column (column 0) - DATE as i32
-        let mut date_vector = output.flat_vector(0);
+        // DuckDB vector size is typically 2048
+        let chunk_size = unsafe { libduckdb_sys::duckdb_vector_size() } as usize;
+        let emit_count = remaining.min(chunk_size);
+        let start = state.position;
+        let end = start + emit_count;
+        let num_group_cols = params.group_by.len();
+
+        // Validate group column count matches expectations
+        if !state.rows.is_empty() && num_group_cols > 0 {
+            let actual = state.rows[start].group_values.len();
+            if actual != num_group_cols {
+                return Err(format!(
+                    "Internal error: expected {} group columns, got {}",
+                    num_group_cols, actual
+                )
+                .into());
+            }
+        }
+
+        // Write group columns (VARCHAR)
+        for g in 0..num_group_cols {
+            let vec = output.flat_vector(g);
+            for (row_offset, row) in state.rows[start..end].iter().enumerate() {
+                vec.insert(row_offset, row.group_values[g].as_str());
+            }
+        }
+
+        // Write forecast_timestamp (DATE as i32)
+        let ts_col = num_group_cols;
+        let mut date_vector = output.flat_vector(ts_col);
         let date_slice = date_vector.as_mut_slice::<i32>();
-        date_slice[..num_rows].copy_from_slice(&result.timestamps);
+        for (row_offset, row) in state.rows[start..end].iter().enumerate() {
+            date_slice[row_offset] = row.timestamp;
+        }
 
-        // Write forecast column (column 1) - DOUBLE
-        let mut forecast_vector = output.flat_vector(1);
-        let forecast_slice = forecast_vector.as_mut_slice::<f64>();
-        forecast_slice[..num_rows].copy_from_slice(&result.forecasts);
+        // Write forecast (DOUBLE)
+        let fc_col = num_group_cols + 1;
+        let mut fc_vector = output.flat_vector(fc_col);
+        let fc_slice = fc_vector.as_mut_slice::<f64>();
+        for (row_offset, row) in state.rows[start..end].iter().enumerate() {
+            fc_slice[row_offset] = row.forecast;
+        }
 
-        // Write lower_bound column (column 2) - DOUBLE
-        let mut lower_vector = output.flat_vector(2);
-        let lower_slice = lower_vector.as_mut_slice::<f64>();
-        lower_slice[..num_rows].copy_from_slice(&result.lower_bounds);
+        // Write lower_bound (DOUBLE)
+        let lb_col = num_group_cols + 2;
+        let mut lb_vector = output.flat_vector(lb_col);
+        let lb_slice = lb_vector.as_mut_slice::<f64>();
+        for (row_offset, row) in state.rows[start..end].iter().enumerate() {
+            lb_slice[row_offset] = row.lower_bound;
+        }
 
-        // Write upper_bound column (column 3) - DOUBLE
-        let mut upper_vector = output.flat_vector(3);
-        let upper_slice = upper_vector.as_mut_slice::<f64>();
-        upper_slice[..num_rows].copy_from_slice(&result.upper_bounds);
+        // Write upper_bound (DOUBLE)
+        let ub_col = num_group_cols + 3;
+        let mut ub_vector = output.flat_vector(ub_col);
+        let ub_slice = ub_vector.as_mut_slice::<f64>();
+        for (row_offset, row) in state.rows[start..end].iter().enumerate() {
+            ub_slice[row_offset] = row.upper_bound;
+        }
 
-        output.set_len(num_rows);
+        state.position = end;
+        output.set_len(emit_count);
         Ok(())
     }
 
@@ -160,4 +220,103 @@ impl VTab for ForecastVTab {
             ),
         ])
     }
+}
+
+/// Compute forecast for a single (non-grouped) time series.
+/// Returns the results as GroupForecastRow with empty group_values for
+/// uniform handling in the output path.
+fn compute_single_forecast(
+    con: libduckdb_sys::duckdb_connection,
+    params: &ForecastParams,
+) -> Result<Vec<GroupForecastRow>, Box<dyn Error>> {
+    let series = unsafe {
+        table_reader::read_time_series(
+            con,
+            &params.table_name,
+            &params.timestamp_col,
+            &params.value_col,
+        )
+    }
+    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+
+    let result: ForecastResult = models::forecast_ets(
+        &series,
+        params.horizon as usize,
+        params.confidence_level,
+    )
+    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+
+    Ok(forecast_result_to_rows(&[], &result))
+}
+
+/// Compute independent forecasts for each group and concatenate the results.
+/// Groups with insufficient data (< MIN_DATA_POINTS) are silently skipped.
+fn compute_grouped_forecast(
+    con: libduckdb_sys::duckdb_connection,
+    params: &ForecastParams,
+) -> Result<Vec<GroupForecastRow>, Box<dyn Error>> {
+    let grouped_series = unsafe {
+        table_reader::read_grouped_time_series(
+            con,
+            &params.table_name,
+            &params.timestamp_col,
+            &params.value_col,
+            &params.group_by,
+        )
+    }
+    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+
+    let mut all_rows = Vec::new();
+
+    for group in &grouped_series {
+        // Skip groups with insufficient data instead of failing
+        if group.series.len() < MIN_DATA_POINTS {
+            eprintln!(
+                "quackstats: skipping group {:?} - insufficient data ({} points, need {})",
+                group.group_key, group.series.len(), MIN_DATA_POINTS
+            );
+            continue;
+        }
+
+        let result = match models::forecast_ets(
+            &group.series,
+            params.horizon as usize,
+            params.confidence_level,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "quackstats: skipping group {:?} - model fitting failed: {}",
+                    group.group_key, e
+                );
+                continue;
+            }
+        };
+
+        let rows = forecast_result_to_rows(&group.group_key, &result);
+        all_rows.extend(rows);
+    }
+
+    Ok(all_rows)
+}
+
+/// Convert a ForecastResult into a vec of GroupForecastRow.
+fn forecast_result_to_rows(
+    group_key: &[String],
+    result: &ForecastResult,
+) -> Vec<GroupForecastRow> {
+    let num_rows = result.timestamps.len();
+    let mut rows = Vec::with_capacity(num_rows);
+
+    for i in 0..num_rows {
+        rows.push(GroupForecastRow {
+            group_values: group_key.to_vec(),
+            timestamp: result.timestamps[i],
+            forecast: result.forecasts[i],
+            lower_bound: result.lower_bounds[i],
+            upper_bound: result.upper_bounds[i],
+        });
+    }
+
+    rows
 }

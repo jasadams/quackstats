@@ -9,7 +9,7 @@ require quackstats
 
 statement ok
 CREATE TABLE trend_up AS
-SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS ts,
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ts,
        50.0 + i * 3.0 AS val
 FROM generate_series(0, 49) t(i);
 
@@ -40,7 +40,7 @@ ORDER BY forecast_timestamp LIMIT 1;
 
 statement ok
 CREATE TABLE flat_data AS
-SELECT '2025-06-01'::DATE + INTERVAL (i) DAY AS ts,
+SELECT ('2025-06-01'::DATE + INTERVAL (i) DAY)::DATE AS ts,
        42.0 AS val
 FROM generate_series(0, 29) t(i);
 
@@ -67,7 +67,7 @@ DATE	DOUBLE	DOUBLE	DOUBLE
 
 statement ok
 CREATE TABLE weekly_data AS
-SELECT '2025-01-06'::DATE + INTERVAL (i * 7) DAY AS ts,
+SELECT ('2025-01-06'::DATE + INTERVAL (i * 7) DAY)::DATE AS ts,
        100.0 + i * 5.0 AS val
 FROM generate_series(0, 11) t(i);
 
@@ -86,7 +86,7 @@ FROM forecast('weekly_data', timestamp = 'ts', value = 'val', horizon = 1);
 
 statement ok
 CREATE TABLE default_cols AS
-SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS timestamp,
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS timestamp,
        10.0 + i AS value
 FROM generate_series(0, 19) t(i);
 
@@ -102,7 +102,7 @@ SELECT count(*) FROM forecast('default_cols');
 # Create noisy data where intervals will be non-zero
 statement ok
 CREATE TABLE noisy_data AS
-SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS ts,
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ts,
        100.0 + i * 2.0 + (CASE WHEN i % 3 = 0 THEN 5.0 WHEN i % 3 = 1 THEN -3.0 ELSE 1.0 END) AS val
 FROM generate_series(0, 29) t(i);
 
@@ -133,7 +133,7 @@ does not exist
 # Too few data points (need >= 4)
 statement ok
 CREATE TABLE tiny_data AS
-SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS timestamp,
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS timestamp,
        1.0 + i AS value
 FROM generate_series(0, 1) t(i);
 

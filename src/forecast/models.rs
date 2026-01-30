@@ -1,10 +1,7 @@
 use augurs_core::{Fit, Predict};
 use augurs_ets::AutoETS;
 
-use crate::common::types::{detect_interval, ForecastResult, TimeSeries};
-
-/// Minimum number of data points required for ETS fitting.
-const MIN_DATA_POINTS: usize = 4;
+use crate::common::types::{detect_interval, ForecastResult, TimeSeries, MIN_DATA_POINTS};
 
 /// Run ETS forecasting on a time series.
 ///

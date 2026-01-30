@@ -1,0 +1,151 @@
+# name: test/sql/forecast_grouped.test
+# group: quackstats
+
+require quackstats
+
+# ============================================================
+# Setup: Create a table with region and product group columns
+# ============================================================
+
+statement ok
+CREATE TABLE sales AS
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       region,
+       product,
+       100.0 + i * 2.0 + (CASE WHEN region = 'US' THEN 10 ELSE 0 END) + (CASE WHEN product = 'Widget' THEN 5 ELSE 0 END) AS revenue
+FROM generate_series(0, 29) t(i),
+     (VALUES ('US'), ('EU'), ('APAC')) AS regions(region),
+     (VALUES ('Widget'), ('Gadget')) AS products(product);
+
+# Verify test data: 30 days * 3 regions * 2 products = 180 rows
+query I
+SELECT count(*) FROM sales;
+----
+180
+
+# ============================================================
+# Test 1: Single group_by column with 3 groups
+# ============================================================
+
+# 3 regions * 5 horizon = 15 rows
+query I
+SELECT count(*)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 5);
+----
+15
+
+# ============================================================
+# Test 2: Multiple group_by columns
+# ============================================================
+
+# 3 regions * 2 products * 3 horizon = 18 rows
+query I
+SELECT count(*)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region', 'product'], horizon = 3);
+----
+18
+
+# ============================================================
+# Test 3: Verify group column values appear in output
+# ============================================================
+
+query I
+SELECT count(DISTINCT region)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 2);
+----
+3
+
+query I
+SELECT count(DISTINCT product)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region', 'product'], horizon = 1);
+----
+2
+
+# ============================================================
+# Test 4: Output schema has group columns before forecast columns
+# ============================================================
+
+query TTRRR
+SELECT typeof(region), typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 1)
+LIMIT 1;
+----
+VARCHAR	DATE	DOUBLE	DOUBLE	DOUBLE
+
+query TTTRRR
+SELECT typeof(region), typeof(product), typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region', 'product'], horizon = 1)
+LIMIT 1;
+----
+VARCHAR	VARCHAR	DATE	DOUBLE	DOUBLE	DOUBLE
+
+# ============================================================
+# Test 5: Group with insufficient data is skipped, others succeed
+# ============================================================
+
+statement ok
+CREATE TABLE sparse_groups AS
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       grp,
+       10.0 + i AS val
+FROM generate_series(0, 29) t(i),
+     (VALUES ('big')) AS g(grp)
+UNION ALL
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       'tiny' AS grp,
+       1.0 + i AS val
+FROM generate_series(0, 1) t(i);
+
+# 'big' has 30 points (enough), 'tiny' has 2 points (skipped)
+# Only 'big' should produce forecast rows: 1 group * 3 horizon = 3
+query I
+SELECT count(*)
+FROM forecast('sparse_groups', timestamp = 'ds', value = 'val', group_by = ['grp'], horizon = 3);
+----
+3
+
+# Verify only 'big' group appears
+query T
+SELECT DISTINCT grp
+FROM forecast('sparse_groups', timestamp = 'ds', value = 'val', group_by = ['grp'], horizon = 3);
+----
+big
+
+# ============================================================
+# Test 6: group_by with non-existent column produces error
+# ============================================================
+
+statement error
+SELECT * FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['nonexistent'], horizon = 3);
+----
+not found
+
+# ============================================================
+# Test 7: Empty group_by list behaves like single-series
+# ============================================================
+
+# Create a simple table for comparison
+statement ok
+CREATE TABLE simple_ts AS
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       50.0 + i * 2.0 AS val
+FROM generate_series(0, 19) t(i);
+
+# Empty list should produce same row count as non-grouped
+query I
+SELECT count(*)
+FROM forecast('simple_ts', timestamp = 'ds', value = 'val', group_by = [], horizon = 5);
+----
+5
+
+# ============================================================
+# Test 8: Forecast values are reasonable per group
+# ============================================================
+
+# Each group's forecast should be > 100 (all groups start at 100+ and trend up)
+query I
+SELECT count(*)
+FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 2)
+WHERE forecast > 100.0;
+----
+6

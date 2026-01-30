@@ -6,7 +6,7 @@ require quackstats
 # Create a test table with a simple linear upward trend
 statement ok
 CREATE TABLE test_linear AS
-SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS ds,
+SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
        100.0 + i * 2.0 AS revenue
 FROM generate_series(0, 29) t(i);
 
