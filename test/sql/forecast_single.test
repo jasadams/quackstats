@@ -1,0 +1,161 @@
+# name: test/sql/forecast_single.test
+# group: quackstats
+
+require quackstats
+
+# ============================================================
+# Test 1: Linear trend data - forecast should continue upward
+# ============================================================
+
+statement ok
+CREATE TABLE trend_up AS
+SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS ts,
+       50.0 + i * 3.0 AS val
+FROM generate_series(0, 49) t(i);
+
+# Should return exactly the requested horizon rows
+query I
+SELECT count(*) FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 7);
+----
+7
+
+# All forecast values should be > 50 (the starting value)
+query I
+SELECT count(*) FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 3)
+WHERE forecast > 50.0;
+----
+3
+
+# Timestamps should be consecutive days after last data point (2025-02-19)
+query T
+SELECT forecast_timestamp
+FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 3)
+ORDER BY forecast_timestamp LIMIT 1;
+----
+2025-02-20
+
+# ============================================================
+# Test 2: Constant data - forecast should be approximately flat
+# ============================================================
+
+statement ok
+CREATE TABLE flat_data AS
+SELECT '2025-06-01'::DATE + INTERVAL (i) DAY AS ts,
+       42.0 AS val
+FROM generate_series(0, 29) t(i);
+
+# Forecast of constant series should be very close to 42.0
+query T
+SELECT abs(forecast - 42.0) < 1.0
+FROM forecast('flat_data', timestamp = 'ts', value = 'val', horizon = 1);
+----
+true
+
+# ============================================================
+# Test 3: Verify output column names
+# ============================================================
+
+query TRRR
+SELECT typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
+FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 1);
+----
+DATE	DOUBLE	DOUBLE	DOUBLE
+
+# ============================================================
+# Test 4: Weekly interval detection
+# ============================================================
+
+statement ok
+CREATE TABLE weekly_data AS
+SELECT '2025-01-06'::DATE + INTERVAL (i * 7) DAY AS ts,
+       100.0 + i * 5.0 AS val
+FROM generate_series(0, 11) t(i);
+
+# With weekly data, the first forecast timestamp should be 7 days after last data point
+# Last point: 2025-01-06 + 77 days = 2025-03-24
+# Next forecast: 2025-03-24 + 7 = 2025-03-31
+query T
+SELECT forecast_timestamp
+FROM forecast('weekly_data', timestamp = 'ts', value = 'val', horizon = 1);
+----
+2025-03-31
+
+# ============================================================
+# Test 5: Default parameters (horizon=3, column names=timestamp/value)
+# ============================================================
+
+statement ok
+CREATE TABLE default_cols AS
+SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS timestamp,
+       10.0 + i AS value
+FROM generate_series(0, 19) t(i);
+
+query I
+SELECT count(*) FROM forecast('default_cols');
+----
+3
+
+# ============================================================
+# Test 6: Custom confidence level with noisy data
+# ============================================================
+
+# Create noisy data where intervals will be non-zero
+statement ok
+CREATE TABLE noisy_data AS
+SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS ts,
+       100.0 + i * 2.0 + (CASE WHEN i % 3 = 0 THEN 5.0 WHEN i % 3 = 1 THEN -3.0 ELSE 1.0 END) AS val
+FROM generate_series(0, 29) t(i);
+
+# Higher confidence should produce wider intervals
+query T
+SELECT u1.spread >= u2.spread
+FROM (
+  SELECT max(upper_bound - lower_bound) as spread
+  FROM forecast('noisy_data', timestamp='ts', value='val', horizon=1, confidence_level=0.99)
+) u1,
+(
+  SELECT max(upper_bound - lower_bound) as spread
+  FROM forecast('noisy_data', timestamp='ts', value='val', horizon=1, confidence_level=0.50)
+) u2;
+----
+true
+
+# ============================================================
+# Test 7: Error cases
+# ============================================================
+
+# Non-existent table
+statement error
+SELECT * FROM forecast('nonexistent_table', timestamp='timestamp', value='value');
+----
+does not exist
+
+# Too few data points (need >= 4)
+statement ok
+CREATE TABLE tiny_data AS
+SELECT '2025-01-01'::DATE + INTERVAL (i) DAY AS timestamp,
+       1.0 + i AS value
+FROM generate_series(0, 1) t(i);
+
+statement error
+SELECT * FROM forecast('tiny_data');
+----
+Need at least
+
+# Empty table name
+statement error
+SELECT * FROM forecast('');
+----
+table name cannot be empty
+
+# Invalid horizon
+statement error
+SELECT * FROM forecast('trend_up', timestamp='ts', value='val', horizon=-1);
+----
+horizon must be a positive integer
+
+# Invalid confidence level
+statement error
+SELECT * FROM forecast('trend_up', timestamp='ts', value='val', confidence_level=1.5);
+----
+confidence_level must be between

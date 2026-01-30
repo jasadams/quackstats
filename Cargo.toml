@@ -20,3 +20,6 @@ crate-type = ["staticlib"]
 [dependencies]
 duckdb = { version = "=1.4.4", features = ["loadable-extension"] }
 libduckdb-sys = "=1.4.4"
+augurs-ets = "0.10"
+augurs-core = "0.10"
+chrono = "0.4"
