@@ -1,12 +1,11 @@
 use duckdb::{
-    core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
+    core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId},
     duckdb_entrypoint_c_api,
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
 use std::{
     error::Error,
-    ffi::CString,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -17,6 +16,7 @@ struct ForecastBindData {
     table_name: String,
     timestamp_col: String,
     value_col: String,
+    group_by: Vec<String>,
     horizon: i64,
     confidence_level: f64,
     model: String,
@@ -72,12 +72,27 @@ impl VTab for ForecastVTab {
         let model = bind
             .get_named_parameter("model")
             .map(|v| v.to_string())
-            .unwrap_or_else(|| "ets".to_string());
+            .unwrap_or_else(|| "auto".to_string());
+
+        // group_by is optional; Phase 1 stores but doesn't use it
+        let group_by = Vec::new();
+
+        // Validate parameters
+        if table_name.is_empty() {
+            return Err("table name cannot be empty".into());
+        }
+        if horizon <= 0 {
+            return Err("horizon must be a positive integer".into());
+        }
+        if confidence_level <= 0.0 || confidence_level >= 1.0 {
+            return Err("confidence_level must be between 0.0 and 1.0 (exclusive)".into());
+        }
 
         Ok(ForecastBindData {
             table_name,
             timestamp_col,
             value_col,
+            group_by,
             horizon,
             confidence_level,
             model,
@@ -111,26 +126,26 @@ impl VTab for ForecastVTab {
 
         // Write date column (column 0) - dates as i32
         let dates: Vec<i32> = (0..horizon as i32).map(|i| BASE_DATE + i).collect();
-        let date_vector = output.flat_vector(0);
-        let date_slice = date_vector.as_mut_slice::<i32>(horizon);
+        let mut date_vector = output.flat_vector(0);
+        let date_slice = date_vector.as_mut_slice::<i32>();
         date_slice[..horizon].copy_from_slice(&dates);
 
         // Write forecast column (column 1) - doubles
         let forecasts = [100.0_f64, 102.0, 104.0];
-        let forecast_vector = output.flat_vector(1);
-        let forecast_slice = forecast_vector.as_mut_slice::<f64>(horizon);
+        let mut forecast_vector = output.flat_vector(1);
+        let forecast_slice = forecast_vector.as_mut_slice::<f64>();
         forecast_slice[..horizon].copy_from_slice(&forecasts[..horizon]);
 
         // Write lower_bound column (column 2) - doubles
         let lower_bounds = [90.0_f64, 91.0, 92.0];
-        let lower_vector = output.flat_vector(2);
-        let lower_slice = lower_vector.as_mut_slice::<f64>(horizon);
+        let mut lower_vector = output.flat_vector(2);
+        let lower_slice = lower_vector.as_mut_slice::<f64>();
         lower_slice[..horizon].copy_from_slice(&lower_bounds[..horizon]);
 
         // Write upper_bound column (column 3) - doubles
         let upper_bounds = [110.0_f64, 113.0, 116.0];
-        let upper_vector = output.flat_vector(3);
-        let upper_slice = upper_vector.as_mut_slice::<f64>(horizon);
+        let mut upper_vector = output.flat_vector(3);
+        let upper_slice = upper_vector.as_mut_slice::<f64>();
         upper_slice[..horizon].copy_from_slice(&upper_bounds[..horizon]);
 
         output.set_len(horizon);
@@ -173,7 +188,6 @@ impl VTab for ForecastVTab {
 
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn quackstats_init(con: Connection) -> Result<(), Box<dyn Error>> {
-    con.register_table_function::<ForecastVTab>("forecast")
-        .expect("Failed to register forecast table function");
+    con.register_table_function::<ForecastVTab>("forecast")?;
     Ok(())
 }
