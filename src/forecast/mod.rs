@@ -222,6 +222,24 @@ impl VTab for ForecastVTab {
     }
 }
 
+/// Route to the correct model based on the model parameter string.
+fn run_forecast(
+    series: &crate::common::types::TimeSeries,
+    horizon: usize,
+    confidence_level: f64,
+    model: &str,
+) -> Result<ForecastResult, String> {
+    match model {
+        "ets" => models::forecast_ets(series, horizon, confidence_level),
+        "linear" => models::forecast_linear(series, horizon, confidence_level),
+        "auto" => models::forecast_auto(series, horizon, confidence_level),
+        _ => Err(format!(
+            "Unknown model '{}'. Valid models: 'auto', 'ets', 'linear'",
+            model
+        )),
+    }
+}
+
 /// Compute forecast for a single (non-grouped) time series.
 /// Returns the results as GroupForecastRow with empty group_values for
 /// uniform handling in the output path.
@@ -239,10 +257,11 @@ fn compute_single_forecast(
     }
     .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
-    let result: ForecastResult = models::forecast_ets(
+    let result: ForecastResult = run_forecast(
         &series,
         params.horizon as usize,
         params.confidence_level,
+        &params.model,
     )
     .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
@@ -278,10 +297,11 @@ fn compute_grouped_forecast(
             continue;
         }
 
-        let result = match models::forecast_ets(
+        let result = match run_forecast(
             &group.series,
             params.horizon as usize,
             params.confidence_level,
+            &params.model,
         ) {
             Ok(r) => r,
             Err(e) => {
