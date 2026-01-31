@@ -1,0 +1,206 @@
+# name: test/sql/seasonality.test
+# group: quackstats
+
+require quackstats
+
+# ============================================================
+# Setup: Create test data with known weekly seasonality
+# ============================================================
+
+# 365 days of data with a strong weekly sine wave pattern
+statement ok
+CREATE TABLE weekly_seasonal AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       100.0 + 20.0 * SIN(2 * PI() * i / 7.0) AS val
+FROM generate_series(0, 364) t(i);
+
+# Verify test data was created
+query I
+SELECT count(*) FROM weekly_seasonal;
+----
+365
+
+# ============================================================
+# Test 1: Basic seasonality detection returns results
+# ============================================================
+
+query I
+SELECT count(*) > 0
+FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val');
+----
+true
+
+# ============================================================
+# Test 2: Output column types are correct
+# ============================================================
+
+query TR
+SELECT typeof(period), typeof(strength)
+FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val')
+LIMIT 1;
+----
+INTEGER	DOUBLE
+
+# ============================================================
+# Test 3: Period 7 is detected in weekly data
+# ============================================================
+
+query I
+SELECT count(*) > 0
+FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val')
+WHERE period = 7;
+----
+true
+
+# ============================================================
+# Test 4: Strength is between 0 and 1
+# ============================================================
+
+query TT
+SELECT min(strength) >= 0.0, max(strength) <= 1.0
+FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val');
+----
+true	true
+
+# ============================================================
+# Test 5: Constant data returns no seasonality
+# ============================================================
+
+statement ok
+CREATE TABLE constant_data AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       42.0 AS val
+FROM generate_series(0, 99) t(i);
+
+query I
+SELECT count(*)
+FROM detect_seasonality('constant_data', timestamp = 'ds', value = 'val');
+----
+0
+
+# ============================================================
+# Test 6: Too few data points produces an error
+# ============================================================
+
+statement ok
+CREATE TABLE tiny_data AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       10.0 + i AS val
+FROM generate_series(0, 4) t(i);
+
+statement error
+SELECT * FROM detect_seasonality('tiny_data', timestamp = 'ds', value = 'val');
+----
+at least 8
+
+# ============================================================
+# Test 7: Default column names (timestamp, value)
+# ============================================================
+
+statement ok
+CREATE TABLE default_cols AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS timestamp,
+       50.0 + 10.0 * SIN(2 * PI() * i / 7.0) AS value
+FROM generate_series(0, 364) t(i);
+
+query I
+SELECT count(*) > 0
+FROM detect_seasonality('default_cols');
+----
+true
+
+# ============================================================
+# Test 8: Empty table name produces error
+# ============================================================
+
+statement error
+SELECT * FROM detect_seasonality('');
+----
+table name cannot be empty
+
+# ============================================================
+# Test 9: Non-existent table produces error
+# ============================================================
+
+statement error
+SELECT * FROM detect_seasonality('does_not_exist', timestamp = 'ds', value = 'val');
+----
+does not exist
+
+# ============================================================
+# Test 10: Grouped seasonality detection
+# ============================================================
+
+# Two groups: one with weekly seasonality, one with no seasonality
+statement ok
+CREATE TABLE grouped_seasonal AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       'seasonal' AS category,
+       100.0 + 20.0 * SIN(2 * PI() * i / 7.0) AS val
+FROM generate_series(0, 364) t(i)
+UNION ALL
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       'flat' AS category,
+       50.0 AS val
+FROM generate_series(0, 364) t(i);
+
+# The seasonal group should have results, the flat group should have none
+# So only the 'seasonal' category should appear in output
+query T
+SELECT DISTINCT category
+FROM detect_seasonality('grouped_seasonal', timestamp = 'ds', value = 'val', group_by = ['category']);
+----
+seasonal
+
+# ============================================================
+# Test 11: Grouped output has correct column types
+# ============================================================
+
+query TTR
+SELECT typeof(category), typeof(period), typeof(strength)
+FROM detect_seasonality('grouped_seasonal', timestamp = 'ds', value = 'val', group_by = ['category'])
+LIMIT 1;
+----
+VARCHAR	INTEGER	DOUBLE
+
+# ============================================================
+# Test 12: Grouped detection with insufficient data skips group
+# ============================================================
+
+statement ok
+CREATE TABLE sparse_seasonal AS
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       'enough' AS grp,
+       100.0 + 20.0 * SIN(2 * PI() * i / 7.0) AS val
+FROM generate_series(0, 364) t(i)
+UNION ALL
+SELECT ('2024-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
+       'too_few' AS grp,
+       1.0 + i AS val
+FROM generate_series(0, 4) t(i);
+
+# Only 'enough' group should produce output (too_few has <8 points)
+query T
+SELECT DISTINCT grp
+FROM detect_seasonality('sparse_seasonal', timestamp = 'ds', value = 'val', group_by = ['grp']);
+----
+enough
+
+# ============================================================
+# Test 13: Non-existent group column produces error
+# ============================================================
+
+statement error
+SELECT * FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val', group_by = ['nonexistent']);
+----
+not found
+
+# ============================================================
+# Test 14: Empty group_by list behaves like single-series
+# ============================================================
+
+query I
+SELECT count(*) > 0
+FROM detect_seasonality('weekly_seasonal', timestamp = 'ds', value = 'val', group_by = []);
+----
+true

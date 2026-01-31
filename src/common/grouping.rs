@@ -9,9 +9,23 @@ pub struct GroupedTimeSeries {
     /// The values for each group column, e.g. ["US", "Widget"].
     pub group_key: Vec<String>,
     /// The column names for each group, e.g. ["region", "product"].
+    /// Currently set by table_reader but not consumed; retained for future use.
+    #[allow(dead_code)]
     pub group_columns: Vec<String>,
     /// The time series data for this group.
     pub series: TimeSeries,
+}
+
+/// A single output row from grouped seasonality detection.
+///
+/// Flat struct for easy row-by-row emission across DataChunk calls.
+pub struct GroupSeasonalityRow {
+    /// Values for each group column (same order as group_columns).
+    pub group_values: Vec<String>,
+    /// Detected seasonal period length.
+    pub period: i32,
+    /// Strength of the seasonal component (0.0 to 1.0).
+    pub strength: f64,
 }
 
 /// A single output row from a grouped forecast.

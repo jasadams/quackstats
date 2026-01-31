@@ -1,11 +1,13 @@
 mod common;
 mod forecast;
+mod seasonality;
 
 use duckdb::{Connection, Result};
 use std::error::Error;
 use std::ffi::CString;
 
 use forecast::ForecastVTab;
+use seasonality::SeasonalityVTab;
 
 /// Connection handle wrapper for executing queries during VTab execution.
 /// Stores a persistent duckdb_connection created at extension init time.
@@ -64,11 +66,12 @@ pub unsafe fn quackstats_init_c_api_internal(
     let mut query_con: libduckdb_sys::duckdb_connection = std::ptr::null_mut();
     let rc = libduckdb_sys::duckdb_connect(db, &mut query_con);
     if rc != libduckdb_sys::duckdb_state_DuckDBSuccess {
-        return Err("Failed to create query connection for forecast function".into());
+        return Err("Failed to create query connection for table functions".into());
     }
 
-    // Register the forecast table function with the query connection as extra info
+    // Register all table functions with the shared query connection
     register_forecast(&connection, query_con)?;
+    register_seasonality(&connection, query_con)?;
 
     Ok(true)
 }
@@ -107,6 +110,18 @@ fn register_forecast(
 ) -> Result<(), Box<dyn Error>> {
     con.register_table_function_with_extra_info::<ForecastVTab, _>(
         "forecast",
+        &ConnHandle(query_con),
+    )?;
+    Ok(())
+}
+
+/// Register the detect_seasonality table function with a query connection as extra info.
+fn register_seasonality(
+    con: &Connection,
+    query_con: libduckdb_sys::duckdb_connection,
+) -> Result<(), Box<dyn Error>> {
+    con.register_table_function_with_extra_info::<SeasonalityVTab, _>(
+        "detect_seasonality",
         &ConnHandle(query_con),
     )?;
     Ok(())
