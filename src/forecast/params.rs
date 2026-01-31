@@ -61,10 +61,10 @@ impl ForecastParams {
             return Err("confidence_level must be between 0.0 and 1.0 (exclusive)".into());
         }
 
-        let valid_models = ["auto", "ets", "linear"];
+        let valid_models = ["auto", "ets", "linear", "exponential", "logistic"];
         if !valid_models.contains(&model.as_str()) {
             return Err(format!(
-                "Invalid model '{}'. Valid models: auto, ets, linear",
+                "Invalid model '{}'. Valid models: auto, ets, linear, exponential, logistic",
                 model
             )
             .into());

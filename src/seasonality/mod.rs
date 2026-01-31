@@ -199,7 +199,7 @@ fn compute_single_seasonality(
             &params.value_col,
         )
     }
-    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
 
     if series.len() < MIN_SEASONALITY_POINTS {
         return Err(format!(
@@ -211,7 +211,7 @@ fn compute_single_seasonality(
     }
 
     let results = detect_seasonality(&series.values)
-        .map_err(|e| -> Box<dyn Error> { e.into() })?;
+        .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
 
     Ok(results
         .into_iter()
@@ -238,7 +238,7 @@ fn compute_grouped_seasonality(
             &params.group_by,
         )
     }
-    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
 
     let mut all_rows = Vec::new();
 

@@ -223,20 +223,42 @@ impl VTab for ForecastVTab {
 }
 
 /// Route to the correct model based on the model parameter string.
+///
+/// Wraps the call in `catch_unwind` to prevent panics from unwinding through
+/// the DuckDB VTab `extern "C"` boundary, which would abort the WASM process.
 fn run_forecast(
     series: &crate::common::types::TimeSeries,
     horizon: usize,
     confidence_level: f64,
     model: &str,
 ) -> Result<ForecastResult, String> {
-    match model {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let result = catch_unwind(AssertUnwindSafe(|| match model {
         "ets" => models::forecast_ets(series, horizon, confidence_level),
         "linear" => models::forecast_linear(series, horizon, confidence_level),
+        "exponential" => models::forecast_exponential(series, horizon, confidence_level),
+        "logistic" => models::forecast_logistic(series, horizon, confidence_level),
         "auto" => models::forecast_auto(series, horizon, confidence_level),
         _ => Err(format!(
-            "Unknown model '{}'. Valid models: 'auto', 'ets', 'linear'",
+            "Unknown model '{}'. Valid models: 'auto', 'ets', 'linear', 'exponential', 'logistic'",
             model
         )),
+    }));
+
+    match result {
+        Ok(inner) => inner,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                format!("Model '{}' panicked: {}", model, s)
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                format!("Model '{}' panicked: {}", model, s)
+            } else {
+                format!("Model '{}' panicked (no message available)", model)
+            };
+            eprintln!("quackstats: {}", msg);
+            Err(msg)
+        }
     }
 }
 
@@ -255,7 +277,9 @@ fn compute_single_forecast(
             &params.value_col,
         )
     }
-    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
+
+    let anchor = last_observation(&series);
 
     let result: ForecastResult = run_forecast(
         &series,
@@ -263,9 +287,9 @@ fn compute_single_forecast(
         params.confidence_level,
         &params.model,
     )
-    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
 
-    Ok(forecast_result_to_rows(&[], &result))
+    Ok(forecast_result_to_rows(&[], anchor.as_ref(), &result))
 }
 
 /// Compute independent forecasts for each group and concatenate the results.
@@ -283,7 +307,7 @@ fn compute_grouped_forecast(
             &params.group_by,
         )
     }
-    .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    .map_err(|e: String| -> Box<dyn Error> { e.into() })?;
 
     let mut all_rows = Vec::new();
 
@@ -296,6 +320,8 @@ fn compute_grouped_forecast(
             );
             continue;
         }
+
+        let anchor = last_observation(&group.series);
 
         let result = match run_forecast(
             &group.series,
@@ -313,20 +339,45 @@ fn compute_grouped_forecast(
             }
         };
 
-        let rows = forecast_result_to_rows(&group.group_key, &result);
+        let rows = forecast_result_to_rows(&group.group_key, anchor.as_ref(), &result);
         all_rows.extend(rows);
     }
 
     Ok(all_rows)
 }
 
+/// Extract the last observation from a time series as an anchor point.
+/// Returns (timestamp, value) for the last data point, or None if empty.
+fn last_observation(series: &crate::common::types::TimeSeries) -> Option<(i32, f64)> {
+    if series.timestamps.is_empty() {
+        return None;
+    }
+    let last = series.timestamps.len() - 1;
+    Some((series.timestamps[last], series.values[last]))
+}
+
 /// Convert a ForecastResult into a vec of GroupForecastRow.
+/// If `anchor` is provided, prepends the last historical observation so the
+/// forecast line connects seamlessly with the real data (no visual gap).
 fn forecast_result_to_rows(
     group_key: &[String],
+    anchor: Option<&(i32, f64)>,
     result: &ForecastResult,
 ) -> Vec<GroupForecastRow> {
     let num_rows = result.timestamps.len();
-    let mut rows = Vec::with_capacity(num_rows);
+    let capacity = num_rows + if anchor.is_some() { 1 } else { 0 };
+    let mut rows = Vec::with_capacity(capacity);
+
+    // Anchor row: last historical value with zero uncertainty
+    if let Some(&(ts, val)) = anchor {
+        rows.push(GroupForecastRow {
+            group_values: group_key.to_vec(),
+            timestamp: ts,
+            forecast: val,
+            lower_bound: val,
+            upper_bound: val,
+        });
+    }
 
     for i in 0..num_rows {
         rows.push(GroupForecastRow {

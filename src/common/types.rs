@@ -27,6 +27,7 @@ impl TimeSeries {
 }
 
 /// The result of a forecasting operation.
+#[derive(Debug)]
 pub struct ForecastResult {
     /// Future timestamps (DuckDB DATE values: days since epoch).
     pub timestamps: Vec<i32>,

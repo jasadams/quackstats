@@ -5,7 +5,7 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 EXTENSION_NAME=quackstats
 
 USE_UNSTABLE_C_API=1
-TARGET_DUCKDB_VERSION=v1.4.4
+TARGET_DUCKDB_VERSION=v1.4.3
 
 all: configure debug
 

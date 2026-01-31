@@ -1,6 +1,16 @@
-mod common;
-mod forecast;
-mod seasonality;
+// Explicit paths ensure modules resolve correctly both when lib.rs is the crate
+// root (normal build) and when included as a submodule from wasm_lib.rs (WASM build).
+// Without these, the WASM example build looks for src/lib/common/ instead of src/common/.
+// Explicit paths ensure modules resolve correctly both when lib.rs is the crate
+// root (normal build) and when included as a submodule from wasm_lib.rs (WASM build).
+// Without these, the WASM example build looks for src/lib/common/ instead of src/common/.
+// pub visibility is required so wasm_lib.rs can re-export them for crate:: path resolution.
+#[path = "common/mod.rs"]
+pub mod common;
+#[path = "forecast/mod.rs"]
+pub mod forecast;
+#[path = "seasonality/mod.rs"]
+pub mod seasonality;
 
 use duckdb::{Connection, Result};
 use std::error::Error;
