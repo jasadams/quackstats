@@ -16,23 +16,26 @@ SELECT count(*) FROM test_linear;
 ----
 30
 
-# Basic forecast call returns the expected number of rows
+# Basic forecast call returns the expected number of rows (horizon + 1 anchor row)
 query I
 SELECT count(*) FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 5);
 ----
-5
+6
 
 # Forecast output has correct column names and types
 query TRRR
 SELECT typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
-FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1);
+FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1)
+LIMIT 1;
 ----
 DATE	DOUBLE	DOUBLE	DOUBLE
 
 # Forecast timestamps should be after the last date in the source data (2025-01-30)
+# (skip the anchor row which equals the last date)
 query T
 SELECT forecast_timestamp > '2025-01-30'::DATE
-FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1);
+FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1)
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 true
 
@@ -40,13 +43,15 @@ true
 # (the point forecast for the next day should be > the last value of ~158)
 query T
 SELECT forecast > 100.0
-FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1);
+FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1)
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 true
 
 # Lower bound should be <= forecast, upper bound should be >= forecast
 query TT
 SELECT lower_bound <= forecast, upper_bound >= forecast
-FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1);
+FROM forecast('test_linear', timestamp = 'ds', value = 'revenue', horizon = 1)
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 true	true

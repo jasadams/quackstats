@@ -27,23 +27,23 @@ SELECT count(*) FROM sales;
 # Test 1: Single group_by column with 3 groups
 # ============================================================
 
-# 3 regions * 5 horizon = 15 rows
+# 3 regions * (5 horizon + 1 anchor) = 18 rows
 query I
 SELECT count(*)
 FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 5);
 ----
-15
+18
 
 # ============================================================
 # Test 2: Multiple group_by columns
 # ============================================================
 
-# 3 regions * 2 products * 3 horizon = 18 rows
+# 3 regions * 2 products * (3 horizon + 1 anchor) = 24 rows
 query I
 SELECT count(*)
 FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region', 'product'], horizon = 3);
 ----
-18
+24
 
 # ============================================================
 # Test 3: Verify group column values appear in output
@@ -97,12 +97,12 @@ SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
 FROM generate_series(0, 1) t(i);
 
 # 'big' has 30 points (enough), 'tiny' has 2 points (skipped)
-# Only 'big' should produce forecast rows: 1 group * 3 horizon = 3
+# Only 'big' should produce rows: 1 group * (3 horizon + 1 anchor) = 4
 query I
 SELECT count(*)
 FROM forecast('sparse_groups', timestamp = 'ds', value = 'val', group_by = ['grp'], horizon = 3);
 ----
-3
+4
 
 # Verify only 'big' group appears
 query T
@@ -131,21 +131,22 @@ SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ds,
        50.0 + i * 2.0 AS val
 FROM generate_series(0, 19) t(i);
 
-# Empty list should produce same row count as non-grouped
+# Empty list should produce same row count as non-grouped (horizon + 1 anchor)
 query I
 SELECT count(*)
 FROM forecast('simple_ts', timestamp = 'ds', value = 'val', group_by = [], horizon = 5);
 ----
-5
+6
 
 # ============================================================
 # Test 8: Forecast values are reasonable per group
 # ============================================================
 
 # Each group's forecast should be > 100 (all groups start at 100+ and trend up)
+# 3 groups * (2 horizon + 1 anchor) = 9, all > 100
 query I
 SELECT count(*)
 FROM forecast('sales', timestamp = 'ds', value = 'revenue', group_by = ['region'], horizon = 2)
 WHERE forecast > 100.0;
 ----
-6
+9

@@ -13,26 +13,26 @@ SELECT ('2025-01-01'::DATE + INTERVAL (i) DAY)::DATE AS ts,
        50.0 + i * 3.0 AS val
 FROM generate_series(0, 49) t(i);
 
-# Should return exactly the requested horizon rows
+# Should return horizon + 1 rows (includes anchor row)
 query I
 SELECT count(*) FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 7);
 ----
-7
+8
 
-# All forecast values should be > 50 (the starting value)
+# All forecast values should be > 50 (the starting value); anchor is also > 50
 query I
 SELECT count(*) FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 3)
 WHERE forecast > 50.0;
 ----
-3
+4
 
-# Timestamps should be consecutive days after last data point (2025-02-19)
+# First row is the anchor (last data point 2025-02-19), then forecast starts
 query T
 SELECT forecast_timestamp
 FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 3)
 ORDER BY forecast_timestamp LIMIT 1;
 ----
-2025-02-20
+2025-02-19
 
 # ============================================================
 # Test 2: Constant data - forecast should be approximately flat
@@ -44,10 +44,11 @@ SELECT ('2025-06-01'::DATE + INTERVAL (i) DAY)::DATE AS ts,
        42.0 AS val
 FROM generate_series(0, 29) t(i);
 
-# Forecast of constant series should be very close to 42.0
+# Forecast of constant series should be very close to 42.0 (check the forecast row, not anchor)
 query T
 SELECT abs(forecast - 42.0) < 1.0
-FROM forecast('flat_data', timestamp = 'ts', value = 'val', horizon = 1);
+FROM forecast('flat_data', timestamp = 'ts', value = 'val', horizon = 1)
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 true
 
@@ -57,7 +58,8 @@ true
 
 query TRRR
 SELECT typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
-FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 1);
+FROM forecast('trend_up', timestamp = 'ts', value = 'val', horizon = 1)
+LIMIT 1;
 ----
 DATE	DOUBLE	DOUBLE	DOUBLE
 
@@ -71,12 +73,13 @@ SELECT ('2025-01-06'::DATE + INTERVAL (i * 7) DAY)::DATE AS ts,
        100.0 + i * 5.0 AS val
 FROM generate_series(0, 11) t(i);
 
-# With weekly data, the first forecast timestamp should be 7 days after last data point
-# Last point: 2025-01-06 + 77 days = 2025-03-24
+# With weekly data, anchor is the last data point, forecast is 7 days later
+# Last point: 2025-01-06 + 77 days = 2025-03-24 (anchor)
 # Next forecast: 2025-03-24 + 7 = 2025-03-31
 query T
 SELECT forecast_timestamp
-FROM forecast('weekly_data', timestamp = 'ts', value = 'val', horizon = 1);
+FROM forecast('weekly_data', timestamp = 'ts', value = 'val', horizon = 1)
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 2025-03-31
 
@@ -93,7 +96,7 @@ FROM generate_series(0, 19) t(i);
 query I
 SELECT count(*) FROM forecast('default_cols');
 ----
-3
+4
 
 # ============================================================
 # Test 6: Custom confidence level with noisy data

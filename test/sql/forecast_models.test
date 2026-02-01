@@ -37,14 +37,14 @@ FROM generate_series(0, 29) t(i),
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 5, model = 'ets');
 ----
-5
+6
 
-# ETS forecast values should be positive and reasonable for upward trend
+# ETS forecast values should be positive and reasonable for upward trend (anchor also > 50)
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 3, model = 'ets')
 WHERE forecast > 50.0;
 ----
-3
+4
 
 # ============================================================
 # Test 2: model := 'linear' - linear regression model
@@ -53,14 +53,14 @@ WHERE forecast > 50.0;
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 5, model = 'linear');
 ----
-5
+6
 
-# Linear model on trending data should continue the upward trend
+# Linear model on trending data should continue the upward trend (anchor also > 100)
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 3, model = 'linear')
 WHERE forecast > 100.0;
 ----
-3
+4
 
 # ============================================================
 # Test 3: model := 'auto' - automatic model selection (default)
@@ -69,20 +69,20 @@ WHERE forecast > 100.0;
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 5, model = 'auto');
 ----
-5
+6
 
-# Auto should also produce reasonable forecasts
+# Auto should also produce reasonable forecasts (anchor also > 50)
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 3, model = 'auto')
 WHERE forecast > 50.0;
 ----
-3
+4
 
 # Default model (no model param) should behave same as 'auto'
 query I
 SELECT count(*) FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 5);
 ----
-5
+6
 
 # ============================================================
 # Test 4: Invalid model name produces clear error
@@ -99,15 +99,17 @@ Invalid model 'invalid'. Valid models: auto, ets, linear
 # ============================================================
 
 # Perfect line: y = 10 + 3*x, last x=49, val=157
-# Next predictions: x=50 -> 160, x=51 -> 163, x=52 -> 166
+# Anchor: x=49 -> 157, then x=50 -> 160, x=51 -> 163, x=52 -> 166
 # With perfect data, predictions should be very close to exact
+# Skip anchor row (i=0) and check forecast rows (i=1,2,3)
 query T
 SELECT abs(forecast - (10.0 + (49 + i) * 3.0)) < 0.01
 FROM (
-  SELECT forecast, row_number() OVER (ORDER BY forecast_timestamp) AS i
+  SELECT forecast, row_number() OVER (ORDER BY forecast_timestamp) - 1 AS i
   FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 3, model = 'linear')
 );
 ----
+true
 true
 true
 true
@@ -148,16 +150,21 @@ true
 # Test 7: Linear model prediction intervals are symmetric
 # ============================================================
 
+# Anchor row has lower_bound == upper_bound == forecast, so symmetry is trivially 0.
+# Check both rows.
 query T
 SELECT abs((upper_bound - forecast) - (forecast - lower_bound)) < 0.001
 FROM forecast('noisy_series', timestamp = 'ts', value = 'val', horizon = 1, model = 'linear');
 ----
+true
 true
 
 # ============================================================
 # Test 8: Linear model has lower_bound < forecast < upper_bound
 # ============================================================
 
+# Anchor row has lower_bound == forecast == upper_bound so it won't match strict <
+# Only the 3 forecast rows match
 query I
 SELECT count(*)
 FROM forecast('noisy_series', timestamp = 'ts', value = 'val', horizon = 3, model = 'linear')
@@ -169,12 +176,12 @@ WHERE lower_bound < forecast AND forecast < upper_bound;
 # Test 9: Grouped forecast with model parameter
 # ============================================================
 
-# 2 groups * 3 horizon = 6 rows
+# 2 groups * (3 horizon + 1 anchor) = 8 rows
 query I
 SELECT count(*)
 FROM forecast('grouped_data', timestamp = 'ds', value = 'val', group_by = ['grp'], horizon = 3, model = 'linear');
 ----
-6
+8
 
 # Both groups should appear
 query I
@@ -188,7 +195,7 @@ query I
 SELECT count(*)
 FROM forecast('grouped_data', timestamp = 'ds', value = 'val', group_by = ['grp'], horizon = 3, model = 'ets');
 ----
-6
+8
 
 # ============================================================
 # Test 10: Output column types are correct for all models
@@ -196,7 +203,8 @@ FROM forecast('grouped_data', timestamp = 'ds', value = 'val', group_by = ['grp'
 
 query TRRR
 SELECT typeof(forecast_timestamp), typeof(forecast), typeof(lower_bound), typeof(upper_bound)
-FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 1, model = 'linear');
+FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 1, model = 'linear')
+LIMIT 1;
 ----
 DATE	DOUBLE	DOUBLE	DOUBLE
 
@@ -204,10 +212,11 @@ DATE	DOUBLE	DOUBLE	DOUBLE
 # Test 11: Timestamps are correct for linear model
 # ============================================================
 
-# Last data point: 2025-01-01 + 49 days = 2025-02-19
-# First forecast: 2025-02-20
+# Last data point: 2025-01-01 + 49 days = 2025-02-19 (anchor)
+# Forecast: 2025-02-20
 query T
 SELECT forecast_timestamp
-FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 1, model = 'linear');
+FROM forecast('linear_trend', timestamp = 'ts', value = 'val', horizon = 1, model = 'linear')
+ORDER BY forecast_timestamp DESC LIMIT 1;
 ----
 2025-02-20
