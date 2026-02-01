@@ -20,11 +20,11 @@ crate-type = ["staticlib"]
 [dependencies]
 duckdb = { version = "=1.4.4", features = ["loadable-extension", "vtab"] }
 libduckdb-sys = "=1.4.4"
-augurs-ets = "0.10"
-augurs-core = "0.10"
-augurs-seasons = "0.10"
+augurs-ets = "0.9"
+augurs-core = "0.9"
+augurs-seasons = "0.9"
 chrono = "0.4"
 linregress = "0.5"
 statrs = "0.18"
-levenberg-marquardt = "0.15"
-nalgebra = { version = "0.34", default-features = false }
+levenberg-marquardt = "0.14"
+nalgebra = { version = "0.33", default-features = false }
